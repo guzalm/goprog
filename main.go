@@ -633,20 +633,23 @@ func AddProductPostHandler(w http.ResponseWriter, r *http.Request) {
 		products = append(products, Product{Name: name, Size: size, Price: price})
 	}
 
-	// Вставка каждого товара в базу данных
+	// Вставка каждого товара в базу данных с использованием горутин
 	for _, product := range products {
-		_, err := db.Exec("INSERT INTO products (name, size, price) VALUES ($1, $2, $3)", product.Name, product.Size, product.Price)
-		if err != nil {
-			fmt.Println("Error inserting into database:", err)
-			http.Error(w, "Error inserting into database", http.StatusInternalServerError)
-			return
-		}
-		fmt.Printf("New product added: Name=%s, Size=%s, Price=%.2f\n", product.Name, product.Size, product.Price)
+		go func(p Product) {
+			_, err := db.Exec("INSERT INTO products (name, size, price) VALUES ($1, $2, $3)", p.Name, p.Size, p.Price)
+			if err != nil {
+				fmt.Println("Error inserting into database:", err)
+				// В случае ошибки вы можете здесь добавить логгирование или обработку ошибки
+				return
+			}
+			fmt.Printf("New product added: Name=%s, Size=%s, Price=%.2f\n", p.Name, p.Size, p.Price)
+		}(product)
 	}
 
 	// Перенаправление на страницу администратора после добавления товаров
 	http.Redirect(w, r, "/admin", http.StatusSeeOther)
 }
+
 
 func EditProductHandler(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Path[len("/edit/"):]
