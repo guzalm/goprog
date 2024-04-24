@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Add Product</title>
+    <link rel="stylesheet" href="/static/css/styles.css">
+    <script>
+        var productCounter = 1;
+    
+        function addInput() {
+            var container = document.getElementById("products-container");
+            var div = document.createElement("div");
+            div.innerHTML = `
+                <div class="product">
+                    <label for="name">Name:</label>
+                    <input type="text" name="name${productCounter}" required><br>
+                    <label for="size">Size:</label>
+                    <input type="text" name="size${productCounter}" required><br>
+                    <label for="price">Price:</label>
+                    <input type="number" name="price${productCounter}" step="0.01" required><br>
+                </div>`;
+            container.appendChild(div);
+            productCounter++;
+        }
+    </script>
+    
+</head>
+<body>
+    <header>
+        <h1>Add new products</h1>
+        <a href="/">Home</a>
+    </header>
+    <form method="post" action="/add-product-post">
+        <div id="products-container">
+            <div class="product">
+                <label for="name">Name:</label>
+                <input type="text" name="name" required><br>
+                <label for="size">Size:</label>
+                <input type="text" name="size" required><br>
+                <label for="price">Price:</label>
+                <input type="number" name="price" step="0.01" required><br>
+            </div>
+        </div>
+        <button type="button" onclick="addInput()">Add Product</button>
+        <button type="submit">Submit</button>
+    </form>
+    <a href="/admin">Back</a>
+</body>
+</html>

@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Admin Panel</title>
+    <link rel="stylesheet" href="/static/css/styles.css">
+</head>
+<body>
+    <header>
+        <h1>Welcome to the Online Store!</h1>
+        <a href="/">Home</a>
+    </header>
+    <form action="/" method="get">
+        <label for="filter">Filter:</label>
+        <input type="text" id="filter" name="filter" placeholder="Enter filter" value="{{.Filter}}">
+        <button type="submit">Apply Filter</button>
+    </form>
+    <form action="/" method="get">
+        <input type="hidden" name="filter" value="{{.Filter}}">
+        <label for="sort">Sort by:</label>
+        <select name="sort" id="sort">
+            <option value="">Default</option>
+            <option value="size" {{if eq .SortBy "size"}}selected{{end}}>Size</option>
+            <option value="price" {{if eq .SortBy "price"}}selected{{end}}>Price</option>
+        </select>
+        <button type="submit">Apply Sort</button>
+    </form>
+    <h2>Products:</h2>
+    <table border="1">
+        <tr>
+            <th>ID</th>
+            <th>Name</th>
+            <th>Size</th>
+            <th>Price</th>
+            <th>Action</th>
+        </tr>
+        {{range .Products}}
+            <tr>
+                <td>{{.ID}}</td>
+                <td>{{.Name}}</td>
+                <td>{{.Size}}</td>
+                <td>${{.Price}}</td>
+                <td>
+                    <form method="post" action="/delete/{{.ID}}">
+                        <input type="hidden" name="_method" value="DELETE">
+                        <button type="submit">Delete</button>
+                    </form>
+                    <form method="get" action="/edit/{{.ID}}">
+                        <button type="submit">Edit</button>
+                    </form>
+                </td>
+            </tr>
+        {{end}}
+    </table>
+    <a href="/add-product">Add Product</a>
+    <div>
+    <span>Page: {{.Page}}</span>
+    <a href="?page={{.PrevPage}}&pageSize={{.PageSize}}">Previous</a>
+    <a href="?page={{.NextPage}}&pageSize={{.PageSize}}">Next</a>
+</div>
+</body>
+</html>

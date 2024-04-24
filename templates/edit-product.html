@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Edit Product</title>
+    <link rel="stylesheet" href="/static/css/styles.css">
+</head>
+<body>
+    <header>
+        <h1>Edit Product</h1>
+        <a href="/">Home</a>
+    </header>
+    <form method="post" action="/edit-product-post/{{.ID}}">
+        <label for="name">Name:</label>
+        <input type="text" name="name" value="{{.Name}}" required><br>
+        <label for="size">Size:</label>
+        <input type="text" name="size" value="{{.Size}}" required><br>
+        <label for="price">Price:</label>
+        <input type="number" name="price" step="0.01" value="{{.Price}}" required><br>
+        <button type="submit">Save Changes</button>
+    </form>
+    <a href="/admin">Back</a>
+</body>
+</html>
