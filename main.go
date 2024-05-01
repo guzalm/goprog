@@ -14,6 +14,8 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+
+	//"sync"
 	"syscall"
 	"time"
 
@@ -602,6 +604,18 @@ func AddProductHandler(w http.ResponseWriter, r *http.Request) {
 
 	tmpl.Execute(w, nil)
 }
+func GenerateProducts() []Product {
+	var products []Product
+	for i := 0; i < 100; i++ {
+		products = append(products, Product{
+			Name:  "golang",
+			Size:  "s",
+			Price: 55.0,
+		})
+	}
+	return products
+}
+
 func AddProductPostHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not supported", http.StatusMethodNotAllowed)
@@ -633,23 +647,85 @@ func AddProductPostHandler(w http.ResponseWriter, r *http.Request) {
 		products = append(products, Product{Name: name, Size: size, Price: price})
 	}
 
-	// Вставка каждого товара в базу данных с использованием горутин
+	start := time.Now()
+
+	// Вставка каждого товара в базу данных без использования горутин
 	for _, product := range products {
-		go func(p Product) {
-			_, err := db.Exec("INSERT INTO products (name, size, price) VALUES ($1, $2, $3)", p.Name, p.Size, p.Price)
-			if err != nil {
-				fmt.Println("Error inserting into database:", err)
-				// В случае ошибки вы можете здесь добавить логгирование или обработку ошибки
-				return
-			}
-			fmt.Printf("New product added: Name=%s, Size=%s, Price=%.2f\n", p.Name, p.Size, p.Price)
-		}(product)
+		_, err := db.Exec("INSERT INTO products (name, size, price) VALUES ($1, $2, $3)", product.Name, product.Size, product.Price)
+		if err != nil {
+			fmt.Println("Error inserting into database:", err)
+			// В случае ошибки вы можете здесь добавить логгирование или обработку ошибки
+			return
+		}
+		fmt.Printf("New product added: Name=%s, Size=%s, Price=%.2f\n", product.Name, product.Size, product.Price)
 	}
+
+	elapsed := time.Since(start)
+
+	fmt.Printf("Time taken to insert %d products: %s\n", len(products), elapsed)
 
 	// Перенаправление на страницу администратора после добавления товаров
 	http.Redirect(w, r, "/admin", http.StatusSeeOther)
 }
 
+func AddProductsWithConcurrency(numGoroutines int) {
+	startTime := time.Now()
+
+	// Создание канала для синхронизации завершения горутин
+	done := make(chan struct{})
+	defer close(done)
+
+	// Создание канала для передачи ошибок из горутин в основной поток
+	errCh := make(chan error, numGoroutines)
+
+	// Запуск горутин для каждого товара
+	for i := 0; i < numGoroutines; i++ {
+		// Логика записи товара в базу данных
+		// Здесь вы можете использовать вашу текущую логику записи товара
+		// Пример:
+		_, err := db.Exec("INSERT INTO products (name, size, price) VALUES ($1, $2, $3)", "Sample Product", "M", 50.0)
+		if err != nil {
+			errCh <- err // Отправляем ошибку в канал ошибок
+			continue
+		}
+
+		// Отправляем сигнал об успешном завершении горутины
+		done <- struct{}{}
+	}
+
+	// Ожидание завершения всех горутин
+	for i := 0; i < numGoroutines; i++ {
+		select {
+		case <-done:
+			// Горутина успешно завершилась
+		case err := <-errCh:
+			// Произошла ошибка в горутине
+			fmt.Printf("Error in goroutine: %v\n", err)
+			return
+		}
+	}
+
+	// Вывод времени затраченного на выполнение всех горутин
+	fmt.Printf("Time taken for %d goroutines: %s\n", numGoroutines, time.Since(startTime))
+}
+
+func AddProducts(numGoroutines int) {
+	startTime := time.Now()
+
+	// Логика записи товара в базу данных без использования горутин
+	for i := 0; i < numGoroutines; i++ {
+		// Здесь вы можете использовать вашу текущую логику записи товара
+		// Пример:
+		_, err := db.Exec("INSERT INTO products (name, size, price) VALUES ($1, $2, $3)", "Sample Product", "M", 50.0)
+		if err != nil {
+			fmt.Printf("Error inserting into database: %v\n", err)
+			return
+		}
+	}
+
+	// Вывод времени затраченного на выполнение всех горутин
+	fmt.Printf("Time taken for %d goroutines: %s\n", numGoroutines, time.Since(startTime))
+}
 
 func EditProductHandler(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Path[len("/edit/"):]
@@ -704,6 +780,7 @@ func EditProductPostHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	startTime := time.Now()
 	// Initialize logger
 	log = logrus.New()
 	log.SetFormatter(&logrus.JSONFormatter{})
@@ -723,6 +800,16 @@ func main() {
 	server := &http.Server{
 		Addr:    "127.0.0.1:8080",
 		Handler: nil, // Your handler will be set later
+	}
+	products := GenerateProducts()
+	for _, product := range products {
+		_, err := db.Exec("INSERT INTO products (name, size, price) VALUES ($1, $2, $3)", product.Name, product.Size, product.Price)
+		if err != nil {
+			fmt.Println("Error inserting into database:", err)
+
+			return
+		}
+		fmt.Printf("New product added: Name=%s, Size=%s, Price=%.2f\n", product.Name, product.Size, product.Price)
 	}
 
 	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
@@ -751,8 +838,6 @@ func main() {
 		}
 	}()
 
-	// Add your chromedp code here
-
 	// Handle graceful shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
@@ -768,4 +853,18 @@ func main() {
 	}
 
 	log.Info("Server has stopped")
+
+	// Вызываем функции для добавления товаров с разным количеством горутин
+	AddProducts(0)
+
+	// Run server in a goroutine for graceful shutdown
+	go func() {
+		log.Println("Server is running at http://127.0.0.1:8080")
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal("Server error:", err)
+		}
+	}()
+
+	elapsedTime := time.Since(startTime)
+	fmt.Printf("Time taken to add products without goroutines: %s\n", elapsedTime)
 }
