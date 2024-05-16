@@ -8,6 +8,7 @@
     <header>
         <h1>Welcome to the Online Store!</h1>
         <a href="/">Home</a>
+        <a href="/chat">Chat</a>
     </header>
     <form action="/" method="get">
         <label for="filter">Filter:</label>
@@ -53,9 +54,58 @@
     </table>
     <a href="/add-product">Add Product</a>
     <div>
-    <span>Page: {{.Page}}</span>
-    <a href="?page={{.PrevPage}}&pageSize={{.PageSize}}">Previous</a>
-    <a href="?page={{.NextPage}}&pageSize={{.PageSize}}">Next</a>
-</div>
+        <span>Page: {{.Page}}</span>
+        <a href="?page={{.PrevPage}}&pageSize={{.PageSize}}">Previous</a>
+        <a href="?page={{.NextPage}}&pageSize={{.PageSize}}">Next</a>
+    </div>
+    <div id="chatContainer"></div>
+    <input type="text" id="messageInput" placeholder="Type your message...">
+    <button type="button" onclick="sendMessage()">Send</button>
+
+    <script>
+        const socketAdmin = new WebSocket("ws://localhost:8080/support-web");
+
+        socketAdmin.onopen = function(event) {
+            console.log("WebSocket is open now.");
+        };
+
+        socketAdmin.onclose = function(event) {
+            console.log("WebSocket is closed now.");
+        };
+
+        socketAdmin.onmessage = function(event) {
+            const message = JSON.parse(event.data);
+            if (message.chatID) {
+                chatID = message.chatID;
+                console.log("Chat ID received:", chatID);
+            } else {
+                updateChat(message.username + ": " + message.text);
+            }
+        };
+
+        socketAdmin.onerror = function(error) {
+            console.error("WebSocket error observed:", error);
+        };
+
+        // Function to update the chat container
+        function updateChat(message) {
+            const chatContainer = document.getElementById("chatContainer");
+            chatContainer.innerHTML += "<p>" + message + "</p>";
+        }
+
+        // Function to send a message to the server
+        function sendMessage() {
+            const messageInput = document.getElementById("messageInput");
+            const message = {
+                text: messageInput.value,
+                username: "Admin", // Change this to dynamic user name
+                chat_id: chatID // This should be set to the chat ID received from the server
+            };
+            socketAdmin.send(JSON.stringify(message));
+            messageInput.value = ""; // Clear the input field
+        }
+
+        let chatID;
+    </script>
 </body>
 </html>
