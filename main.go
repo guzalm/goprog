@@ -14,14 +14,11 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
-
-	//"sync"
 	"syscall"
 	"time"
 
-	_ "github.com/lib/pq"
-	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	_ "github.com/lib/pq"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/time/rate"
 )
@@ -51,15 +48,32 @@ type News struct {
 	URL         string
 }
 
+// Chat structure represents a chat between client and support
+type Chat struct {
+	ID       string
+	Client   string
+	Support  string
+	Messages []Message
+	Closed   bool
+}
+
+// Message structure represents a message in the chat
+type Message struct {
+	Text      string    `json:"text"`
+	Username  string    `json:"username"`
+	ChatID    string    `json:"chat_id"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
 var (
-	db        *sql.DB
-	log       *logrus.Logger
-	limiter   = rate.NewLimiter(1, 3) // Rate limit of 1 request per second with a burst of 3 requests
-	templates = template.Must(template.ParseGlob("templates/*.html"))
-	notifications = make(chan string, 10) // Канал для уведомлений
-    clients       = make(map[*websocket.Conn]bool) // Соединения с клиентами
-    broadcast     = make(chan string) // Канал для рассылки сообщений
-    
+	db             *sql.DB
+	log            *logrus.Logger
+	limiter        = rate.NewLimiter(1, 3) // Rate limit of 1 request per second with a burst of 3 requests
+	templates      = template.Must(template.ParseGlob("templates/*.html"))
+	notifications  = make(chan string, 10)            // Канал для уведомлений
+	userClients    = make(map[*websocket.Conn]string) // Соединения с клиентами
+	supportClients = make(map[*websocket.Conn]string) // Соединения с сотрудниками поддержки
+	chats          = make(map[string]*Chat)
 )
 
 func fetchNewsFromAPI(apiKey, keyword string) ([]News, error) {
@@ -115,7 +129,7 @@ func initDB() *sql.DB {
 
 	log.Info("Connected to the database")
 
-	// Create the users and products table if it doesn't exist
+	// Create the users, products, chats, and messages table if they don't exist
 	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS users (
 		username TEXT PRIMARY KEY,
 		email TEXT UNIQUE,
@@ -127,6 +141,17 @@ func initDB() *sql.DB {
 		name TEXT,
 		size TEXT,
 		price INT
+	); CREATE TABLE IF NOT EXISTS chats (
+		id TEXT PRIMARY KEY,
+		client TEXT,
+		support TEXT,
+		closed BOOL
+	); CREATE TABLE IF NOT EXISTS messages (
+		id SERIAL PRIMARY KEY,
+		chat_id TEXT,
+		text TEXT,
+		username TEXT,
+		timestamp TIMESTAMP
 	);`)
 	if err != nil {
 		log.Fatal(err)
@@ -370,7 +395,7 @@ func LoginPostHandler(w http.ResponseWriter, r *http.Request) {
 	if user.Role == "admin" {
 		http.Redirect(w, r, "/admin", http.StatusSeeOther)
 	} else {
-		http.Redirect(w, r, "/index", http.StatusSeeOther)//index edit-profile
+		http.Redirect(w, r, "/index", http.StatusSeeOther) //index edit-profile
 	}
 }
 
@@ -503,7 +528,7 @@ func ProfileEditPostHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Update the user's profile in the database
 	if password != "" {
-		_, err := db.Exec("UPDATE users SET email=$1 AND password=$2 WHERE username=$3", email, password, username)
+		_, err := db.Exec("UPDATE users SET email=$1, password=$2 WHERE username=$3", email, password, username)
 		if err != nil {
 			log.Println("Error updating user profile in database:", err)
 			http.Error(w, "Error updating user profile in database", http.StatusInternalServerError)
@@ -601,6 +626,7 @@ func DeleteHandler(w http.ResponseWriter, r *http.Request) {
 
 	http.Redirect(w, r, "/admin", http.StatusSeeOther)
 }
+
 func AddProductHandler(w http.ResponseWriter, r *http.Request) {
 	tmpl := templates.Lookup("add-product.html")
 	if tmpl == nil {
@@ -610,9 +636,10 @@ func AddProductHandler(w http.ResponseWriter, r *http.Request) {
 
 	tmpl.Execute(w, nil)
 }
+
 func GenerateProducts() []Product {
 	var products []Product
-	for i := 0; i < 1; i++ {//поменяла 100 на 1
+	for i := 0; i < 1; i++ { //поменяла 100 на 1
 		products = append(products, Product{
 			Name:  "golang",
 			Size:  "s",
@@ -785,135 +812,168 @@ func EditProductPostHandler(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/admin", http.StatusSeeOther)
 }
 
-var upgrader = websocket.Upgrader{
-    ReadBufferSize:  1024,
-    WriteBufferSize: 1024,
-    CheckOrigin: func(r *http.Request) bool {
-        return true
-    },
+var (
+	upgrader = websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool {
+			return true
+		},
+	}
+)
+
+// Обработчик WebSocket для пользователей
+// Обработчик WebSocket для пользователей
+func handleUserWebSocket(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Println("WebSocket upgrade error:", err)
+		return
+	}
+	defer conn.Close()
+
+	// Генерация уникального идентификатора чата
+	chatID := generateChatID()
+	chat := &Chat{
+		ID:       chatID,
+		Client:   "user", // Идентификатор клиента будет назначен позже
+		Support:  "",
+		Messages: []Message{},
+		Closed:   false,
+	}
+	chats[chatID] = chat
+
+	// Отправка идентификатора чата клиенту
+	conn.WriteJSON(map[string]string{"chatID": chatID})
+
+	// Регистрируем нового клиента
+	userClients[conn] = chatID
+
+	// Обработка входящих сообщений
+	for {
+		var msg Message
+		err := conn.ReadJSON(&msg)
+		if err != nil {
+			log.Printf("Warning: Error reading message from user: %v", err)
+			delete(userClients, conn)
+			break
+		}
+		if msg.Text == "" {
+			continue // Игнорировать пустые сообщения
+		}
+		msg.Timestamp = time.Now()
+		msg.ChatID = chatID
+		chat.Messages = append(chat.Messages, msg)
+
+		// Сохранение сообщения в базу данных
+		if err := saveMessageToDB(msg); err != nil {
+			log.Printf("Error saving message to database: %v", err)
+		}
+
+		// Отправка сообщения сотрудникам поддержки
+		for supportConn := range supportClients {
+			if err := supportConn.WriteJSON(msg); err != nil {
+				log.Printf("Error sending message to support: %v", err)
+				continue
+			}
+		}
+	}
 }
 
-// Обработчик WebSocket
-func handleWebSocket(w http.ResponseWriter, r *http.Request) {
-    // Обновляем HTTP-запрос до WebSocket-соединения
-    conn, err := upgrader.Upgrade(w, r, nil)
-    if err != nil {
-        fmt.Println("Ошибка при обновлении соединения:", err)
-        return
-    }
-    defer conn.Close()
+func handleSupportWebSocket(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Println("WebSocket upgrade error:", err)
+		return
+	}
+	defer conn.Close()
 
-    // Регистрируем клиента
-    clients[conn] = true
+	// Регистрируем нового клиента
+	supportClients[conn] = ""
 
-    // Ждем сообщений от клиента
-    for {
-        // Читаем сообщение от клиента
-        _, message, err := conn.ReadMessage()
-        if err != nil {
-            fmt.Println("Ошибка при чтении сообщения:", err)
-            delete(clients, conn)
-            break
-        }
+	// Обработка входящих сообщений
+	for {
+		var msg Message
+		err := conn.ReadJSON(&msg)
+		if err != nil {
+			log.Printf("Error reading message from support: %v", err)
+			delete(supportClients, conn)
+			break
+		}
+		if msg.Text == "" {
+			continue // Игнорировать пустые сообщения
+		}
+		msg.Timestamp = time.Now()
+		// Найти чат, к которому относится сообщение
+		chat, ok := chats[msg.ChatID]
+		if !ok {
+			log.Println("Chat not found")
+			continue
+		}
+		chat.Messages = append(chat.Messages, msg)
 
-        // Отправляем сообщение всем клиентам
-        for client := range clients {
-            if client != conn { // Исключаем отправку сообщения обратно самому себе
-                err := client.WriteMessage(websocket.TextMessage, message)
-                if err != nil {
-                    fmt.Println("Ошибка при отправке сообщения:", err)
-                    delete(clients, client)
-                    client.Close()
-                }
-            }
-        }
-    }
+		// Сохранение сообщения в базу данных
+		if err := saveMessageToDB(msg); err != nil {
+			log.Printf("Error saving message to database: %v", err)
+		}
+
+		// Отправка сообщения клиенту
+		for userConn, cID := range userClients {
+			if cID == msg.ChatID {
+				if err := userConn.WriteJSON(msg); err != nil {
+					log.Printf("Error sending message to user: %v", err)
+					continue
+				}
+			}
+		}
+	}
 }
 
 
-
-func handleCreateChat(w http.ResponseWriter, r *http.Request) {
-    // Генерируем новый UUID
-    id := uuid.New()
-    fmt.Println("UUID для нового чата:", id)
-
-    // Здесь вы можете использовать UUID для создания нового чата
-    // Например, сохранить его в базе данных и отправить его клиенту
-}
-func sendNotifications() {
-    for {
-        // Ждем уведомлений на канале
-        msg := <-notifications
-        // Отправляем уведомление всем клиентам
-        for client := range clients {
-            err := client.WriteMessage(websocket.TextMessage, []byte(msg))
-            if err != nil {
-                fmt.Println("Ошибка при отправке уведомления:", err)
-                delete(clients, client)
-                client.Close()
-            }
-        }
-    }
+func generateChatID() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return fmt.Sprintf("%x", b)
 }
 
+func saveChatToDB(chat *Chat) error {
+	_, err := db.Exec("INSERT INTO chats (id, client, support, closed) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO UPDATE SET closed = $4",
+		chat.ID, chat.Client, chat.Support, chat.Closed)
+	if err != nil {
+		return err
+	}
 
-
-
-// Структура для хранения информации о чате
-type Chat struct {
-    ID     string
-    Client *websocket.Conn
-    Support *websocket.Conn
-	Participants []string
-    // Другие поля чата
-}
-type Message struct {
-    ID       int
-    ChatID   string
-    Sender   string
-    Content  string
-    // Другие поля сообщения
+	for _, msg := range chat.Messages {
+		_, err := db.Exec("INSERT INTO messages (chat_id, text, username, timestamp) VALUES ($1, $2, $3, $4)",
+			chat.ID, msg.Text, msg.Username, msg.Timestamp)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-var activeChats = make(map[string]*Chat)
-
-// Функция для закрытия чата
-func closeChat(chatID string) {
-    // Удалить чат из списка активных чатов
-    delete(activeChats, chatID)
+func saveMessageToDB(msg Message) error {
+	_, err := db.Exec("INSERT INTO messages (chat_id, text, username, timestamp) VALUES ($1, $2, $3, $4)",
+		msg.ChatID, msg.Text, msg.Username, msg.Timestamp)
+	return err
 }
 
-// Обработчик WebSocket для закрытия чата
-func handleCloseChat(w http.ResponseWriter, r *http.Request) {
-    // Получить идентификатор чата из запроса
-    chatID := r.URL.Query().Get("chatID")
 
-    // Закрыть чат
-    closeChat(chatID)
-
-    // Отправить подтверждение об успешном закрытии
-    w.WriteHeader(http.StatusOK)
-    w.Write([]byte("Chat closed successfully"))
-}
-
-// Функция для сохранения сообщения в базу данных
-func saveMessage(db *sql.DB, message Message) error {
-    _, err := db.Exec("INSERT INTO messages (chat_id, sender, content) VALUES ($1, $2, $3)", message.ChatID, message.Sender, message.Content)
-    return err
-}
-
-func saveChat(db *sql.DB, chat Chat) error {
-    participantsJSON, err := json.Marshal(chat.Participants)
-    if err != nil {
-        return err
-    }
-    _, err = db.Exec("INSERT INTO chats (id, participants) VALUES ($1, $2)", chat.ID, string(participantsJSON))
-    return err
+func closeChat(chatID string) error {
+	chat, ok := chats[chatID]
+	if !ok || chat.Closed {
+		return fmt.Errorf("Chat not found or already closed")
+	}
+	chat.Closed = true
+	err := saveChatToDB(chat)
+	if err != nil {
+		return err
+	}
+	delete(chats, chatID)
+	return nil
 }
 
 func main() {
 	startTime := time.Now()
-	go sendNotifications()
 	// Initialize logger
 	log = logrus.New()
 	log.SetFormatter(&logrus.JSONFormatter{})
@@ -929,17 +989,6 @@ func main() {
 	db = initDB()
 	defer db.Close()
 
-	 // Пример сохранения чата и сообщения
-	 chat := Chat{ID: "1", Participants: []string{"user1", "user2"}}
-	 if err := saveChat(db, chat); err != nil {
-		 fmt.Println("Ошибка при сохранении чата:", err)
-	 }
- 
-	 message := Message{ChatID: "1", Sender: "user1", Content: "Привет, как дела?"}
-	 if err := saveMessage(db, message); err != nil {
-		 fmt.Println("Ошибка при сохранении сообщения:", err)
-	 }
-
 	// Set up HTTP server
 	server := &http.Server{
 		Addr:    "127.0.0.1:8080",
@@ -950,7 +999,6 @@ func main() {
 		_, err := db.Exec("INSERT INTO products (name, size, price) VALUES ($1, $2, $3)", product.Name, product.Size, product.Price)
 		if err != nil {
 			fmt.Println("Error inserting into database:", err)
-
 			return
 		}
 		fmt.Printf("New product added: Name=%s, Size=%s, Price=%.2f\n", product.Name, product.Size, product.Price)
@@ -973,9 +1021,8 @@ func main() {
 	http.HandleFunc("/add-product-post", AddProductPostHandler)
 	http.HandleFunc("/edit/", EditProductHandler)
 	http.HandleFunc("/edit-product-post/", EditProductPostHandler)
-	http.HandleFunc("/ws", handleWebSocket)
-	http.HandleFunc("/create-chat", handleCreateChat)
-    http.HandleFunc("/close-chat", handleCloseChat)
+	http.HandleFunc("/user-web", handleUserWebSocket)
+	http.HandleFunc("/support-web", handleSupportWebSocket)
 
 	// Run server in a goroutine for graceful shutdown
 	go func() {
@@ -1004,17 +1051,6 @@ func main() {
 	// Вызываем функции для добавления товаров с разным количеством горутин
 	AddProducts(0)
 
-	// Run server in a goroutine for graceful shutdown
-	go func() {
-		log.Println("Server is running at http://127.0.0.1:8080")
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatal("Server error:", err)
-		}
-	}()
-
 	elapsedTime := time.Since(startTime)
 	fmt.Printf("Time taken to add products without goroutines: %s\n", elapsedTime)
-}
-func serveIndex(w http.ResponseWriter, r *http.Request) {
-    http.ServeFile(w, r, "web.html")
 }
