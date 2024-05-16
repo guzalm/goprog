@@ -14,6 +14,7 @@
         {{ else }}
         <a href="/register">Register</a>
         <a href="/login">Login</a>
+        <a href="/chat">Chat</a>
         {{ end }}
     </header>
     <form action="/" method="get">
@@ -31,8 +32,6 @@
         </select>
         <button type="submit">Apply Sort</button>
     </form>
-
-   
 
     <h2>Products:</h2>
     <table border="1">
@@ -71,5 +70,54 @@
         </ul>
     </section>
 
+    <div id="chatContainer"></div>
+    <input type="text" id="messageInput" placeholder="Type your message...">
+    <button type="button" onclick="sendMessage()">Send</button>
+
+    <script>
+        const socketUser = new WebSocket("ws://localhost:8080/user-web");
+
+        socketUser.onopen = function(event) {
+            console.log("WebSocket is open now.");
+        };
+
+        socketUser.onclose = function(event) {
+            console.log("WebSocket is closed now.");
+        };
+
+        socketUser.onmessage = function(event) {
+            const message = JSON.parse(event.data);
+            if (message.chatID) {
+                chatID = message.chatID;
+                console.log("Chat ID received:", chatID);
+            } else {
+                updateChat(message.username + ": " + message.text);
+            }
+        };
+
+        socketUser.onerror = function(error) {
+            console.error("WebSocket error observed:", error);
+        };
+
+        // Function to update the chat container
+        function updateChat(message) {
+            const chatContainer = document.getElementById("chatContainer");
+            chatContainer.innerHTML += "<p>" + message + "</p>";
+        }
+
+        // Function to send a message to the server
+        function sendMessage() {
+            const messageInput = document.getElementById("messageInput");
+            const message = {
+                text: messageInput.value,
+                username: "User", // Change this to dynamic user name
+                chat_id: chatID // This should be set to the chat ID received from the server
+            };
+            socketUser.send(JSON.stringify(message));
+            messageInput.value = ""; // Clear the input field
+        }
+
+        let chatID;
+    </script>
 </body>
 </html>
