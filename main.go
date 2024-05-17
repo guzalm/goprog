@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -14,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -59,10 +61,11 @@ type Chat struct {
 
 // Message structure represents a message in the chat
 type Message struct {
-	Text      string    `json:"text"`
-	Username  string    `json:"username"`
-	ChatID    string    `json:"chat_id"`
-	Timestamp time.Time `json:"timestamp"`
+	Text       string    `json:"text"`
+	AdminText2 string    `json:"admin_text2"`
+	Username   string    `json:"username"`
+	ChatID     string    `json:"chat_id"`
+	Timestamp  time.Time `json:"timestamp"`
 }
 
 var (
@@ -74,6 +77,7 @@ var (
 	userClients    = make(map[*websocket.Conn]string) // Соединения с клиентами
 	supportClients = make(map[*websocket.Conn]string) // Соединения с сотрудниками поддержки
 	chats          = make(map[string]*Chat)
+	chatMessages   = make(chan Message) // Channel for chat messages
 )
 
 func fetchNewsFromAPI(apiKey, keyword string) ([]News, error) {
@@ -150,9 +154,10 @@ func initDB() *sql.DB {
 		id SERIAL PRIMARY KEY,
 		chat_id TEXT,
 		text TEXT,
+		admin_text2 TEXT,
 		username TEXT,
 		timestamp TIMESTAMP
-	);`)
+	); ALTER TABLE messages ADD COLUMN IF NOT EXISTS admin_text2 TEXT;`)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -821,7 +826,6 @@ var (
 )
 
 // Обработчик WebSocket для пользователей
-// Обработчик WebSocket для пользователей
 func handleUserWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -830,24 +834,22 @@ func handleUserWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	// Генерация уникального идентификатора чата
 	chatID := generateChatID()
 	chat := &Chat{
 		ID:       chatID,
-		Client:   "user", // Идентификатор клиента будет назначен позже
+		Client:   "user",
 		Support:  "",
 		Messages: []Message{},
 		Closed:   false,
 	}
 	chats[chatID] = chat
 
-	// Отправка идентификатора чата клиенту
+	log.Printf("New chat created with ID: %s", chatID)
+
 	conn.WriteJSON(map[string]string{"chatID": chatID})
 
-	// Регистрируем нового клиента
 	userClients[conn] = chatID
 
-	// Обработка входящих сообщений
 	for {
 		var msg Message
 		err := conn.ReadJSON(&msg)
@@ -856,19 +858,20 @@ func handleUserWebSocket(w http.ResponseWriter, r *http.Request) {
 			delete(userClients, conn)
 			break
 		}
-		if msg.Text == "" {
-			continue // Игнорировать пустые сообщения
+		if msg.Text == "" && msg.AdminText2 == "" {
+			continue
 		}
 		msg.Timestamp = time.Now()
 		msg.ChatID = chatID
 		chat.Messages = append(chat.Messages, msg)
 
-		// Сохранение сообщения в базу данных
+		log.Printf("User message received for chatID %s: %s", chatID, msg.Text)
+		chatMessages <- msg // Send the message to the channel
+
 		if err := saveMessageToDB(msg); err != nil {
 			log.Printf("Error saving message to database: %v", err)
 		}
 
-		// Отправка сообщения сотрудникам поддержки
 		for supportConn := range supportClients {
 			if err := supportConn.WriteJSON(msg); err != nil {
 				log.Printf("Error sending message to support: %v", err)
@@ -886,10 +889,8 @@ func handleSupportWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	// Регистрируем нового клиента
 	supportClients[conn] = ""
 
-	// Обработка входящих сообщений
 	for {
 		var msg Message
 		err := conn.ReadJSON(&msg)
@@ -898,24 +899,24 @@ func handleSupportWebSocket(w http.ResponseWriter, r *http.Request) {
 			delete(supportClients, conn)
 			break
 		}
-		if msg.Text == "" {
-			continue // Игнорировать пустые сообщения
+		if msg.Text == "" && msg.AdminText2 == "" {
+			continue
 		}
 		msg.Timestamp = time.Now()
-		// Найти чат, к которому относится сообщение
+
+		log.Printf("Support message received for chatID %s: %s", msg.ChatID, msg.AdminText2)
+
 		chat, ok := chats[msg.ChatID]
 		if !ok {
-			log.Println("Chat not found")
+			log.Printf("Chat not found for chatID %s", msg.ChatID)
 			continue
 		}
 		chat.Messages = append(chat.Messages, msg)
 
-		// Сохранение сообщения в базу данных
 		if err := saveMessageToDB(msg); err != nil {
 			log.Printf("Error saving message to database: %v", err)
 		}
 
-		// Отправка сообщения клиенту
 		for userConn, cID := range userClients {
 			if cID == msg.ChatID {
 				if err := userConn.WriteJSON(msg); err != nil {
@@ -926,7 +927,6 @@ func handleSupportWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 }
-
 
 func generateChatID() string {
 	b := make([]byte, 16)
@@ -942,8 +942,8 @@ func saveChatToDB(chat *Chat) error {
 	}
 
 	for _, msg := range chat.Messages {
-		_, err := db.Exec("INSERT INTO messages (chat_id, text, username, timestamp) VALUES ($1, $2, $3, $4)",
-			chat.ID, msg.Text, msg.Username, msg.Timestamp)
+		_, err := db.Exec("INSERT INTO messages (chat_id, text, admin_text2, username, timestamp) VALUES ($1, $2, $3, $4, $5)",
+			chat.ID, msg.Text, msg.AdminText2, msg.Username, msg.Timestamp)
 		if err != nil {
 			return err
 		}
@@ -952,11 +952,10 @@ func saveChatToDB(chat *Chat) error {
 }
 
 func saveMessageToDB(msg Message) error {
-	_, err := db.Exec("INSERT INTO messages (chat_id, text, username, timestamp) VALUES ($1, $2, $3, $4)",
-		msg.ChatID, msg.Text, msg.Username, msg.Timestamp)
+	_, err := db.Exec("INSERT INTO messages (chat_id, text, admin_text2, username, timestamp) VALUES ($1, $2, $3, $4, $5)",
+		msg.ChatID, msg.Text, msg.AdminText2, msg.Username, msg.Timestamp)
 	return err
 }
-
 
 func closeChat(chatID string) error {
 	chat, ok := chats[chatID]
@@ -1023,6 +1022,57 @@ func main() {
 	http.HandleFunc("/edit-product-post/", EditProductPostHandler)
 	http.HandleFunc("/user-web", handleUserWebSocket)
 	http.HandleFunc("/support-web", handleSupportWebSocket)
+
+	// Goroutine to read admin input from terminal
+	go func() {
+		reader := bufio.NewReader(os.Stdin)
+		for {
+			fmt.Print("Enter chat ID to respond: ")
+			chatID, _ := reader.ReadString('\n')
+			chatID = strings.TrimSpace(chatID)
+
+			fmt.Print("Enter your message: ")
+			adminMessage, _ := reader.ReadString('\n')
+			adminMessage = strings.TrimSpace(adminMessage)
+
+			msg := Message{
+				AdminText2: adminMessage,
+				Username:   "Admin",
+				ChatID:     chatID,
+				Timestamp:  time.Now(),
+			}
+
+			if err := saveMessageToDB(msg); err != nil {
+				log.Printf("Error saving admin message to database: %v", err)
+				continue
+			}
+
+			chat, ok := chats[chatID]
+			if !ok {
+				log.Printf("Chat not found for chatID %s", chatID)
+				continue
+			}
+
+			chat.Messages = append(chat.Messages, msg)
+
+			for userConn, cID := range userClients {
+				if cID == chatID {
+					if err := userConn.WriteJSON(msg); err != nil {
+						log.Printf("Error sending admin message to user: %v", err)
+					}
+				}
+			}
+
+			fmt.Printf("Admin message sent to chatID %s: %s\n", chatID, adminMessage)
+		}
+	}()
+
+	// Goroutine to display user messages in the terminal
+	go func() {
+		for msg := range chatMessages {
+			fmt.Printf("New message from user %s in chat %s: %s\n", msg.Username, msg.ChatID, msg.Text)
+		}
+	}()
 
 	// Run server in a goroutine for graceful shutdown
 	go func() {
