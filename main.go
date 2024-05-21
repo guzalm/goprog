@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -9,13 +8,15 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+
+	//	"log"
 	"math/big"
 	"net/http"
 	"net/smtp"
 	"os"
 	"os/signal"
 	"strconv"
-	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -50,34 +51,31 @@ type News struct {
 	URL         string
 }
 
-// Chat structure represents a chat between client and support
-type Chat struct {
-	ID       string
-	Client   string
-	Support  string
-	Messages []Message
-	Closed   bool
-}
-
-// Message structure represents a message in the chat
+// Message structure represents a chat message
 type Message struct {
-	Text       string    `json:"text"`
-	AdminText2 string    `json:"admin_text2"`
-	Username   string    `json:"username"`
-	ChatID     string    `json:"chat_id"`
-	Timestamp  time.Time `json:"timestamp"`
+	ID        int       `json:"id"`
+	ChatID    string    `json:"chatId"`
+	Sender    string    `json:"sender"`
+	Content   string    `json:"content"`
+	Timestamp time.Time `json:"timestamp"`
 }
 
 var (
-	db             *sql.DB
-	log            *logrus.Logger
-	limiter        = rate.NewLimiter(1, 3) // Rate limit of 1 request per second with a burst of 3 requests
-	templates      = template.Must(template.ParseGlob("templates/*.html"))
-	notifications  = make(chan string, 10)            // Канал для уведомлений
-	userClients    = make(map[*websocket.Conn]string) // Соединения с клиентами
-	supportClients = make(map[*websocket.Conn]string) // Соединения с сотрудниками поддержки
-	chats          = make(map[string]*Chat)
-	chatMessages   = make(chan Message) // Channel for chat messages
+	db        *sql.DB
+	log       *logrus.Logger
+	limiter   = rate.NewLimiter(1, 3) // Rate limit of 1 request per second with a burst of 3 requests
+	templates = template.Must(template.ParseGlob("templates/*.html"))
+
+	upgrader = websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		CheckOrigin: func(r *http.Request) bool {
+			return true
+		},
+	}
+	clients   = make(map[*websocket.Conn]bool)
+	broadcast = make(chan Message)
+	mu        sync.Mutex
 )
 
 func fetchNewsFromAPI(apiKey, keyword string) ([]News, error) {
@@ -133,31 +131,27 @@ func initDB() *sql.DB {
 
 	log.Info("Connected to the database")
 
-	// Create the users, products, chats, and messages table if they don't exist
+	// Create the users, products, and messages table if they don't exist
 	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS users (
 		username TEXT PRIMARY KEY,
 		email TEXT UNIQUE,
 		password TEXT,
 		role TEXT,
 		otp TEXT
-	); CREATE TABLE IF NOT EXISTS products (
+	); 
+	CREATE TABLE IF NOT EXISTS products (
 		id SERIAL PRIMARY KEY,
 		name TEXT,
 		size TEXT,
 		price INT
-	); CREATE TABLE IF NOT EXISTS chats (
-		id TEXT PRIMARY KEY,
-		client TEXT,
-		support TEXT,
-		closed BOOL
-	); CREATE TABLE IF NOT EXISTS messages (
+	);
+	CREATE TABLE IF NOT EXISTS messages (
 		id SERIAL PRIMARY KEY,
 		chat_id TEXT,
-		text TEXT,
-		admin_text2 TEXT,
-		username TEXT,
-		timestamp TIMESTAMP
-	); ALTER TABLE messages ADD COLUMN IF NOT EXISTS admin_text2 TEXT;`)
+		sender TEXT,
+		content TEXT,
+		timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);`)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -400,7 +394,7 @@ func LoginPostHandler(w http.ResponseWriter, r *http.Request) {
 	if user.Role == "admin" {
 		http.Redirect(w, r, "/admin", http.StatusSeeOther)
 	} else {
-		http.Redirect(w, r, "/index", http.StatusSeeOther) //index edit-profile
+		http.Redirect(w, r, "/index", http.StatusSeeOther)
 	}
 }
 
@@ -463,6 +457,12 @@ func IndexHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	chatID := "default_chat_id" // Use the appropriate chat ID
+	messages, err := fetchMessages(chatID)
+	if err != nil {
+		log.Error("Error fetching messages:", err)
+	}
+
 	data := struct {
 		Filter     string
 		SortBy     string
@@ -473,6 +473,8 @@ func IndexHandler(w http.ResponseWriter, r *http.Request) {
 		PageSize   int
 		IsLoggedIn bool
 		News       []News
+		Messages   []Message
+		ChatID     string
 	}{
 		Filter:     filter,
 		SortBy:     sortBy,
@@ -483,6 +485,8 @@ func IndexHandler(w http.ResponseWriter, r *http.Request) {
 		PageSize:   pageSize,
 		IsLoggedIn: isLoggedIn,
 		News:       newsList,
+		Messages:   messages,
+		ChatID:     chatID,
 	}
 
 	// Render the template with the data
@@ -533,7 +537,7 @@ func ProfileEditPostHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Update the user's profile in the database
 	if password != "" {
-		_, err := db.Exec("UPDATE users SET email=$1, password=$2 WHERE username=$3", email, password, username)
+		_, err := db.Exec("UPDATE users SET email=$1 AND password=$2 WHERE username=$3", email, password, username)
 		if err != nil {
 			log.Println("Error updating user profile in database:", err)
 			http.Error(w, "Error updating user profile in database", http.StatusInternalServerError)
@@ -642,127 +646,23 @@ func AddProductHandler(w http.ResponseWriter, r *http.Request) {
 	tmpl.Execute(w, nil)
 }
 
-func GenerateProducts() []Product {
-	var products []Product
-	for i := 0; i < 1; i++ { //поменяла 100 на 1
-		products = append(products, Product{
-			Name:  "golang",
-			Size:  "s",
-			Price: 55.0,
-		})
-	}
-	return products
-}
-
 func AddProductPostHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not supported", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// Парсинг формы для получения товаров
-	err := r.ParseForm()
+	_, err := db.Exec("INSERT INTO products (name, size, price) VALUES ($1, $2, $3)",
+		r.FormValue("name"), r.FormValue("size"), r.FormValue("price"))
 	if err != nil {
-		http.Error(w, "Error parsing form", http.StatusInternalServerError)
+		fmt.Println("Error inserting into database:", err)
+		http.Error(w, "Error inserting into database", http.StatusInternalServerError)
 		return
 	}
 
-	// Извлечение товаров из формы
-	var products []Product
-	for i := 1; ; i++ {
-		// Получение значений для каждого товара, используя уникальные имена полей
-		name := r.FormValue(fmt.Sprintf("name%d", i))
-		size := r.FormValue(fmt.Sprintf("size%d", i))
-		// Проверка наличия имени и размера
-		if name == "" && size == "" {
-			break
-		}
-		price, err := strconv.ParseFloat(r.FormValue(fmt.Sprintf("price%d", i)), 64)
-		if err != nil {
-			http.Error(w, "Invalid price", http.StatusBadRequest)
-			return
-		}
-		products = append(products, Product{Name: name, Size: size, Price: price})
-	}
+	fmt.Printf("New product added: Name=%s, Size=%s, Price=%s\n", r.FormValue("name"), r.FormValue("size"), r.FormValue("price"))
 
-	start := time.Now()
-
-	// Вставка каждого товара в базу данных без использования горутин
-	for _, product := range products {
-		_, err := db.Exec("INSERT INTO products (name, size, price) VALUES ($1, $2, $3)", product.Name, product.Size, product.Price)
-		if err != nil {
-			fmt.Println("Error inserting into database:", err)
-			// В случае ошибки вы можете здесь добавить логгирование или обработку ошибки
-			return
-		}
-		fmt.Printf("New product added: Name=%s, Size=%s, Price=%.2f\n", product.Name, product.Size, product.Price)
-	}
-
-	elapsed := time.Since(start)
-
-	fmt.Printf("Time taken to insert %d products: %s\n", len(products), elapsed)
-
-	// Перенаправление на страницу администратора после добавления товаров
 	http.Redirect(w, r, "/admin", http.StatusSeeOther)
-}
-
-func AddProductsWithConcurrency(numGoroutines int) {
-	startTime := time.Now()
-
-	// Создание канала для синхронизации завершения горутин
-	done := make(chan struct{})
-	defer close(done)
-
-	// Создание канала для передачи ошибок из горутин в основной поток
-	errCh := make(chan error, numGoroutines)
-
-	// Запуск горутин для каждого товара
-	for i := 0; i < numGoroutines; i++ {
-		// Логика записи товара в базу данных
-		// Здесь вы можете использовать вашу текущую логику записи товара
-		// Пример:
-		_, err := db.Exec("INSERT INTO products (name, size, price) VALUES ($1, $2, $3)", "Sample Product", "M", 50.0)
-		if err != nil {
-			errCh <- err // Отправляем ошибку в канал ошибок
-			continue
-		}
-
-		// Отправляем сигнал об успешном завершении горутины
-		done <- struct{}{}
-	}
-
-	// Ожидание завершения всех горутин
-	for i := 0; i < numGoroutines; i++ {
-		select {
-		case <-done:
-			// Горутина успешно завершилась
-		case err := <-errCh:
-			// Произошла ошибка в горутине
-			fmt.Printf("Error in goroutine: %v\n", err)
-			return
-		}
-	}
-
-	// Вывод времени затраченного на выполнение всех горутин
-	fmt.Printf("Time taken for %d goroutines: %s\n", numGoroutines, time.Since(startTime))
-}
-
-func AddProducts(numGoroutines int) {
-	startTime := time.Now()
-
-	// Логика записи товара в базу данных без использования горутин
-	for i := 0; i < numGoroutines; i++ {
-		// Здесь вы можете использовать вашу текущую логику записи товара
-		// Пример:
-		_, err := db.Exec("INSERT INTO products (name, size, price) VALUES ($1, $2, $3)", "Sample Product", "M", 50.0)
-		if err != nil {
-			fmt.Printf("Error inserting into database: %v\n", err)
-			return
-		}
-	}
-
-	// Вывод времени затраченного на выполнение всех горутин
-	fmt.Printf("Time taken for %d goroutines: %s\n", numGoroutines, time.Since(startTime))
 }
 
 func EditProductHandler(w http.ResponseWriter, r *http.Request) {
@@ -817,167 +717,88 @@ func EditProductPostHandler(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/admin", http.StatusSeeOther)
 }
 
-var (
-	upgrader = websocket.Upgrader{
-		CheckOrigin: func(r *http.Request) bool {
-			return true
-		},
-	}
-)
-
-// Обработчик WebSocket для пользователей
-func handleUserWebSocket(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
+func handleConnections(w http.ResponseWriter, r *http.Request) {
+	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Println("WebSocket upgrade error:", err)
-		return
+		log.Fatalf("Error upgrading to websocket: %v", err)
 	}
-	defer conn.Close()
+	defer ws.Close()
 
-	chatID := generateChatID()
-	chat := &Chat{
-		ID:       chatID,
-		Client:   "user",
-		Support:  "",
-		Messages: []Message{},
-		Closed:   false,
-	}
-	chats[chatID] = chat
-
-	log.Printf("New chat created with ID: %s", chatID)
-
-	conn.WriteJSON(map[string]string{"chatID": chatID})
-
-	userClients[conn] = chatID
+	mu.Lock()
+	clients[ws] = true
+	mu.Unlock()
 
 	for {
 		var msg Message
-		err := conn.ReadJSON(&msg)
+		err := ws.ReadJSON(&msg)
 		if err != nil {
-			log.Printf("Warning: Error reading message from user: %v", err)
-			delete(userClients, conn)
+			log.Printf("Error reading message: %v", err)
+			mu.Lock()
+			delete(clients, ws)
+			mu.Unlock()
 			break
 		}
-		if msg.Text == "" && msg.AdminText2 == "" {
-			continue
-		}
-		msg.Timestamp = time.Now()
-		msg.ChatID = chatID
-		chat.Messages = append(chat.Messages, msg)
 
-		log.Printf("User message received for chatID %s: %s", chatID, msg.Text)
-		chatMessages <- msg // Send the message to the channel
-
-		if err := saveMessageToDB(msg); err != nil {
-			log.Printf("Error saving message to database: %v", err)
+		// Insert message into the database
+		_, err = db.Exec("INSERT INTO messages (chat_id, sender, content) VALUES ($1, $2, $3)",
+			msg.ChatID, msg.Sender, msg.Content)
+		if err != nil {
+			log.Printf("Error inserting message into database: %v", err)
 		}
 
-		for supportConn := range supportClients {
-			if err := supportConn.WriteJSON(msg); err != nil {
-				log.Printf("Error sending message to support: %v", err)
-				continue
-			}
-		}
+		// Broadcast the message to all clients
+		broadcast <- msg
 	}
 }
+func fetchMessages(chatID string) ([]Message, error) {
+	var messages []Message
 
-func handleSupportWebSocket(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
+	rows, err := db.Query("SELECT id, chat_id, sender, content, timestamp FROM messages WHERE chat_id = $1 ORDER BY timestamp ASC", chatID)
 	if err != nil {
-		log.Println("WebSocket upgrade error:", err)
-		return
+		log.Error("Error fetching messages from the database:", err)
+		return nil, err
 	}
-	defer conn.Close()
+	defer rows.Close()
 
-	supportClients[conn] = ""
-
-	for {
+	for rows.Next() {
 		var msg Message
-		err := conn.ReadJSON(&msg)
-		if err != nil {
-			log.Printf("Error reading message from support: %v", err)
-			delete(supportClients, conn)
-			break
-		}
-		if msg.Text == "" && msg.AdminText2 == "" {
+		if err := rows.Scan(&msg.ID, &msg.ChatID, &msg.Sender, &msg.Content, &msg.Timestamp); err != nil {
+			log.Error("Error scanning message row:", err)
 			continue
 		}
-		msg.Timestamp = time.Now()
+		messages = append(messages, msg)
+	}
 
-		log.Printf("Support message received for chatID %s: %s", msg.ChatID, msg.AdminText2)
+	if err := rows.Err(); err != nil {
+		log.Error("Error iterating over message rows:", err)
+		return nil, err
+	}
 
-		chat, ok := chats[msg.ChatID]
-		if !ok {
-			log.Printf("Chat not found for chatID %s", msg.ChatID)
-			continue
-		}
-		chat.Messages = append(chat.Messages, msg)
+	return messages, nil
+}
 
-		if err := saveMessageToDB(msg); err != nil {
-			log.Printf("Error saving message to database: %v", err)
-		}
-
-		for userConn, cID := range userClients {
-			if cID == msg.ChatID {
-				if err := userConn.WriteJSON(msg); err != nil {
-					log.Printf("Error sending message to user: %v", err)
-					continue
-				}
+// handleMessages broadcasts messages to all clients
+func handleMessages() {
+	for {
+		msg := <-broadcast
+		mu.Lock()
+		for client := range clients {
+			err := client.WriteJSON(msg)
+			if err != nil {
+				log.Printf("Error writing message: %v", err)
+				client.Close()
+				delete(clients, client)
 			}
 		}
+		mu.Unlock()
 	}
-}
-
-func generateChatID() string {
-	b := make([]byte, 16)
-	rand.Read(b)
-	return fmt.Sprintf("%x", b)
-}
-
-func saveChatToDB(chat *Chat) error {
-	_, err := db.Exec("INSERT INTO chats (id, client, support, closed) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO UPDATE SET closed = $4",
-		chat.ID, chat.Client, chat.Support, chat.Closed)
-	if err != nil {
-		return err
-	}
-
-	for _, msg := range chat.Messages {
-		_, err := db.Exec("INSERT INTO messages (chat_id, text, admin_text2, username, timestamp) VALUES ($1, $2, $3, $4, $5)",
-			chat.ID, msg.Text, msg.AdminText2, msg.Username, msg.Timestamp)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func saveMessageToDB(msg Message) error {
-	_, err := db.Exec("INSERT INTO messages (chat_id, text, admin_text2, username, timestamp) VALUES ($1, $2, $3, $4, $5)",
-		msg.ChatID, msg.Text, msg.AdminText2, msg.Username, msg.Timestamp)
-	return err
-}
-
-func closeChat(chatID string) error {
-	chat, ok := chats[chatID]
-	if !ok || chat.Closed {
-		return fmt.Errorf("Chat not found or already closed")
-	}
-	chat.Closed = true
-	err := saveChatToDB(chat)
-	if err != nil {
-		return err
-	}
-	delete(chats, chatID)
-	return nil
 }
 
 func main() {
-	startTime := time.Now()
 	// Initialize logger
 	log = logrus.New()
 	log.SetFormatter(&logrus.JSONFormatter{})
 	file, err := os.OpenFile("logfile.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
-
 	if err == nil {
 		log.SetOutput(io.MultiWriter(file, os.Stdout))
 	} else {
@@ -992,15 +813,6 @@ func main() {
 	server := &http.Server{
 		Addr:    "127.0.0.1:8080",
 		Handler: nil, // Your handler will be set later
-	}
-	products := GenerateProducts()
-	for _, product := range products {
-		_, err := db.Exec("INSERT INTO products (name, size, price) VALUES ($1, $2, $3)", product.Name, product.Size, product.Price)
-		if err != nil {
-			fmt.Println("Error inserting into database:", err)
-			return
-		}
-		fmt.Printf("New product added: Name=%s, Size=%s, Price=%.2f\n", product.Name, product.Size, product.Price)
 	}
 
 	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
@@ -1020,59 +832,10 @@ func main() {
 	http.HandleFunc("/add-product-post", AddProductPostHandler)
 	http.HandleFunc("/edit/", EditProductHandler)
 	http.HandleFunc("/edit-product-post/", EditProductPostHandler)
-	http.HandleFunc("/user-web", handleUserWebSocket)
-	http.HandleFunc("/support-web", handleSupportWebSocket)
 
-	// Goroutine to read admin input from terminal
-	go func() {
-		reader := bufio.NewReader(os.Stdin)
-		for {
-			fmt.Print("Enter chat ID to respond: ")
-			chatID, _ := reader.ReadString('\n')
-			chatID = strings.TrimSpace(chatID)
-
-			fmt.Print("Enter your message: ")
-			adminMessage, _ := reader.ReadString('\n')
-			adminMessage = strings.TrimSpace(adminMessage)
-
-			msg := Message{
-				AdminText2: adminMessage,
-				Username:   "Admin",
-				ChatID:     chatID,
-				Timestamp:  time.Now(),
-			}
-
-			if err := saveMessageToDB(msg); err != nil {
-				log.Printf("Error saving admin message to database: %v", err)
-				continue
-			}
-
-			chat, ok := chats[chatID]
-			if !ok {
-				log.Printf("Chat not found for chatID %s", chatID)
-				continue
-			}
-
-			chat.Messages = append(chat.Messages, msg)
-
-			for userConn, cID := range userClients {
-				if cID == chatID {
-					if err := userConn.WriteJSON(msg); err != nil {
-						log.Printf("Error sending admin message to user: %v", err)
-					}
-				}
-			}
-
-			fmt.Printf("Admin message sent to chatID %s: %s\n", chatID, adminMessage)
-		}
-	}()
-
-	// Goroutine to display user messages in the terminal
-	go func() {
-		for msg := range chatMessages {
-			fmt.Printf("New message from user %s in chat %s: %s\n", msg.Username, msg.ChatID, msg.Text)
-		}
-	}()
+	// WebSocket routes
+	http.HandleFunc("/ws", handleConnections)
+	go handleMessages()
 
 	// Run server in a goroutine for graceful shutdown
 	go func() {
@@ -1097,10 +860,4 @@ func main() {
 	}
 
 	log.Info("Server has stopped")
-
-	// Вызываем функции для добавления товаров с разным количеством горутин
-	AddProducts(0)
-
-	elapsedTime := time.Since(startTime)
-	fmt.Printf("Time taken to add products without goroutines: %s\n", elapsedTime)
 }
