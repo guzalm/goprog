@@ -1,21 +1,46 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Admin Panel</title>
     <link rel="stylesheet" href="/static/css/styles.css">
+    <script>
+        document.addEventListener("DOMContentLoaded", function() {
+            const ws = new WebSocket('ws://127.0.0.1:8080/ws');
+
+            ws.onmessage = function(event) {
+                const message = JSON.parse(event.data);
+                const chatBox = document.getElementById('chatBox');
+                chatBox.innerHTML += `<div><strong>${message.sender}:</strong> ${message.content}</div>`;
+            };
+
+            document.getElementById('sendMessage').onclick = function() {
+                const input = document.getElementById('messageInput');
+                const message = {
+                    chatId: '1', // Replace with dynamic chat ID
+                    sender: 'admin', // Replace with dynamic sender ID or name
+                    content: input.value
+                };
+                ws.send(JSON.stringify(message));
+                input.value = '';
+            };
+        });
+    </script>
 </head>
 <body>
     <header>
-        <h1>Welcome to the Online Store!</h1>
+        <h1>Welcome to the Admin Panel!</h1>
         <a href="/">Home</a>
-        <a href="/chat">Chat</a>
     </header>
-    <form action="/" method="get">
+
+    <form action="/admin" method="get">
         <label for="filter">Filter:</label>
         <input type="text" id="filter" name="filter" placeholder="Enter filter" value="{{.Filter}}">
         <button type="submit">Apply Filter</button>
     </form>
-    <form action="/" method="get">
+
+    <form action="/admin" method="get">
         <input type="hidden" name="filter" value="{{.Filter}}">
         <label for="sort">Sort by:</label>
         <select name="sort" id="sort">
@@ -25,6 +50,7 @@
         </select>
         <button type="submit">Apply Sort</button>
     </form>
+
     <h2>Products:</h2>
     <table border="1">
         <tr>
@@ -35,77 +61,37 @@
             <th>Action</th>
         </tr>
         {{range .Products}}
-            <tr>
-                <td>{{.ID}}</td>
-                <td>{{.Name}}</td>
-                <td>{{.Size}}</td>
-                <td>${{.Price}}</td>
-                <td>
-                    <form method="post" action="/delete/{{.ID}}">
-                        <input type="hidden" name="_method" value="DELETE">
-                        <button type="submit">Delete</button>
-                    </form>
-                    <form method="get" action="/edit/{{.ID}}">
-                        <button type="submit">Edit</button>
-                    </form>
-                </td>
-            </tr>
+        <tr>
+            <td>{{.ID}}</td>
+            <td>{{.Name}}</td>
+            <td>{{.Size}}</td>
+            <td>${{.Price}}</td>
+            <td>
+                <form method="post" action="/delete/{{.ID}}">
+                    <input type="hidden" name="_method" value="DELETE">
+                    <button type="submit">Delete</button>
+                </form>
+                <form method="get" action="/edit/{{.ID}}">
+                    <button type="submit">Edit</button>
+                </form>
+            </td>
+        </tr>
         {{end}}
     </table>
+
     <a href="/add-product">Add Product</a>
+
     <div>
         <span>Page: {{.Page}}</span>
         <a href="?page={{.PrevPage}}&pageSize={{.PageSize}}">Previous</a>
         <a href="?page={{.NextPage}}&pageSize={{.PageSize}}">Next</a>
     </div>
-    <div id="chatContainer"></div>
-    <input type="text" id="messageInput" placeholder="Type your message...">
-    <button type="button" onclick="sendMessage()">Send</button>
 
-    <script>
-        const socketAdmin = new WebSocket("ws://localhost:8080/support-web");
-
-        socketAdmin.onopen = function(event) {
-            console.log("WebSocket is open now.");
-        };
-
-        socketAdmin.onclose = function(event) {
-            console.log("WebSocket is closed now.");
-        };
-
-        socketAdmin.onmessage = function(event) {
-            const message = JSON.parse(event.data);
-            if (message.chatID) {
-                chatID = message.chatID;
-                console.log("Chat ID received:", chatID);
-            } else {
-                updateChat(message.username + ": " + message.text);
-            }
-        };
-
-        socketAdmin.onerror = function(error) {
-            console.error("WebSocket error observed:", error);
-        };
-
-        // Function to update the chat container
-        function updateChat(message) {
-            const chatContainer = document.getElementById("chatContainer");
-            chatContainer.innerHTML += "<p>" + message + "</p>";
-        }
-
-        // Function to send a message to the server
-        function sendMessage() {
-            const messageInput = document.getElementById("messageInput");
-            const message = {
-                text: messageInput.value,
-                username: "Admin", // Change this to dynamic user name
-                chat_id: chatID // This should be set to the chat ID received from the server
-            };
-            socketAdmin.send(JSON.stringify(message));
-            messageInput.value = ""; // Clear the input field
-        }
-
-        let chatID;
-    </script>
+    <section id="chat">
+        <h2>Customer Support Chat</h2>
+        <div id="chatBox" style="border: 1px solid #000; padding: 10px; height: 300px; overflow-y: scroll;"></div>
+        <input type="text" id="messageInput">
+        <button id="sendMessage">Send</button>
+    </section>
 </body>
 </html>
