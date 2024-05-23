@@ -7,19 +7,22 @@
     <link rel="stylesheet" href="/static/css/styles.css">
     <script>
         document.addEventListener("DOMContentLoaded", function() {
+            const chatID = new URLSearchParams(window.location.search).get("chatID");
             const ws = new WebSocket('ws://127.0.0.1:8080/ws');
 
             ws.onmessage = function(event) {
                 const message = JSON.parse(event.data);
-                const chatBox = document.getElementById('chatBox');
-                chatBox.innerHTML += `<div><strong>${message.sender}:</strong> ${message.content}</div>`;
+                if (message.chatId === chatID) {
+                    const chatBox = document.getElementById('chatBox');
+                    chatBox.innerHTML += `<div><strong>${message.sender}:</strong> ${message.content}</div>`;
+                }
             };
 
             document.getElementById('sendMessage').onclick = function() {
                 const input = document.getElementById('messageInput');
                 const message = {
-                    chatId: '1', // Replace with dynamic chat ID
-                    sender: 'admin', // Replace with dynamic sender ID or name
+                    chatId: chatID,
+                    sender: 'admin', // Обязательно установите sender как 'admin'
                     content: input.value
                 };
                 ws.send(JSON.stringify(message));
@@ -87,11 +90,45 @@
         <a href="?page={{.NextPage}}&pageSize={{.PageSize}}">Next</a>
     </div>
 
+    <h2>User Chats:</h2>
+    <ul>
+        {{range .Users}}
+        <li><a href="/chat?chatID={{.ChatID}}">Chat with {{.Username}}</a></li>
+        {{end}}
+    </ul>
+
     <section id="chat">
         <h2>Customer Support Chat</h2>
         <div id="chatBox" style="border: 1px solid #000; padding: 10px; height: 300px; overflow-y: scroll;"></div>
         <input type="text" id="messageInput">
         <button id="sendMessage">Send</button>
     </section>
+    <script>
+        document.addEventListener("DOMContentLoaded", function() {
+            const chatID = new URLSearchParams(window.location.search).get("chatID");
+            const ws = new WebSocket('ws://127.0.0.1:8080/ws');
+    
+            ws.onmessage = function(event) {
+                const message = JSON.parse(event.data);
+                if (message.chatId === chatID) {
+                    const chatBox = document.getElementById('chatBox');
+                    chatBox.innerHTML += `<div><strong>${message.sender}:</strong> ${message.content}</div>`;
+                }
+            };
+    
+            document.getElementById('sendMessage').onclick = function() {
+                const input = document.getElementById('messageInput');
+                const message = {
+                    chatId: chatID,
+                    sender: 'admin', // Установите 'admin' для администратора
+                    content: input.value
+                };
+                ws.send(JSON.stringify(message));
+                input.value = '';
+            };
+        });
+    </script>
 </body>
+
+
 </html>
