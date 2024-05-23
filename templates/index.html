@@ -7,18 +7,21 @@
     <link rel="stylesheet" href="/static/css/styles.css">
     <script>
         document.addEventListener("DOMContentLoaded", function() {
+            const chatID = new URLSearchParams(window.location.search).get("chatID");
             const ws = new WebSocket('ws://127.0.0.1:8080/ws');
 
             ws.onmessage = function(event) {
                 const message = JSON.parse(event.data);
-                const chatBox = document.getElementById('chatBox');
-                chatBox.innerHTML += `<div><strong>${message.sender}:</strong> ${message.content}</div>`;
+                if (message.chatId === chatID) {
+                    const chatBox = document.getElementById('chatBox');
+                    chatBox.innerHTML += `<div><strong>${message.sender}:</strong> ${message.content}</div>`;
+                }
             };
 
             document.getElementById('sendMessage').onclick = function() {
                 const input = document.getElementById('messageInput');
                 const message = {
-                    chatId: '1', // Replace with dynamic chat ID
+                    chatId: chatID,
                     sender: 'client', // Replace with dynamic sender ID or name
                     content: input.value
                 };
@@ -35,6 +38,7 @@
         <a href="/logout">Log out</a>
         <a href="/admin">Admin Panel</a>
         <a href="/profile-edit">Profile Edit</a>
+        <a href="/chat?chatID={{.ChatID}}">Chat with Admin</a>
         {{ else }}
         <a href="/register">Register</a>
         <a href="/login">Login</a>
@@ -102,5 +106,32 @@
         <input type="text" id="messageInput">
         <button id="sendMessage">Send</button>
     </section>
+    <script>
+        document.addEventListener("DOMContentLoaded", function() {
+            const chatID = new URLSearchParams(window.location.search).get("chatID");
+            const ws = new WebSocket('ws://127.0.0.1:8080/ws');
+    
+            ws.onmessage = function(event) {
+                const message = JSON.parse(event.data);
+                if (message.chatId === chatID) {
+                    const chatBox = document.getElementById('chatBox');
+                    chatBox.innerHTML += `<div><strong>${message.sender}:</strong> ${message.content}</div>`;
+                }
+            };
+    
+            document.getElementById('sendMessage').onclick = function() {
+                const input = document.getElementById('messageInput');
+                const message = {
+                    chatId: chatID,
+                    sender: 'user', // Установите 'user' для пользователя
+                    content: input.value
+                };
+                ws.send(JSON.stringify(message));
+                input.value = '';
+            };
+        });
+    </script>
+    
 </body>
+
 </html>
