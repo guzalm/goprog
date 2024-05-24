@@ -21,7 +21,7 @@
             document.getElementById('sendMessage').onclick = function() {
                 const input = document.getElementById('messageInput');
                 const message = {
-                    chatId: chatID,
+                    chatId: parseInt(chatID, 10),
                     sender: 'client', // Replace with dynamic sender ID or name
                     content: input.value
                 };
@@ -38,7 +38,9 @@
         <a href="/logout">Log out</a>
         <a href="/admin">Admin Panel</a>
         <a href="/profile-edit">Profile Edit</a>
-        <a href="/chat?chatID={{.ChatID}}">Chat with Admin</a>
+        <form action="/create-chat" method="post">
+            <button type="submit">Create Chat</button>
+        </form>
         {{ else }}
         <a href="/register">Register</a>
         <a href="/login">Login</a>
@@ -113,7 +115,7 @@
     
             ws.onmessage = function(event) {
                 const message = JSON.parse(event.data);
-                if (message.chatId === chatID) {
+                if (message.chatId === parseInt(chatID, 10)) {
                     const chatBox = document.getElementById('chatBox');
                     chatBox.innerHTML += `<div><strong>${message.sender}:</strong> ${message.content}</div>`;
                 }
@@ -122,7 +124,7 @@
             document.getElementById('sendMessage').onclick = function() {
                 const input = document.getElementById('messageInput');
                 const message = {
-                    chatId: chatID,
+                    chatId: parseInt(chatID, 10),
                     sender: 'user', // Установите 'user' для пользователя
                     content: input.value
                 };
@@ -133,5 +135,4 @@
     </script>
     
 </body>
-
 </html>
