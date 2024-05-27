@@ -438,6 +438,18 @@ func IndexHandler(w http.ResponseWriter, r *http.Request) {
 
 	isLoggedIn := IsLoggedIn(r)
 
+	var ableChatID int
+	if isLoggedIn {
+		cookie, err := r.Cookie("username")
+		if err == nil {
+			username := cookie.Value
+			err := db.QueryRow("SELECT id FROM chats WHERE user_id = $1 AND status = 'able'", username).Scan(&ableChatID)
+			if err != nil && err != sql.ErrNoRows {
+				log.Error("Error checking for able chat:", err)
+			}
+		}
+	}
+
 	// Rate limiting check
 	if !limiter.Allow() {
 		http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
@@ -486,6 +498,7 @@ func IndexHandler(w http.ResponseWriter, r *http.Request) {
 		News       []News
 		Messages   []Message
 		ChatID     string
+		AbleChatID int
 	}{
 		Filter:     filter,
 		SortBy:     sortBy,
@@ -498,11 +511,13 @@ func IndexHandler(w http.ResponseWriter, r *http.Request) {
 		News:       newsList,
 		Messages:   messages,
 		ChatID:     chatID,
+		AbleChatID: ableChatID,
 	}
 
 	// Render the template with the data
 	tmpl.Execute(w, data)
 }
+
 
 // ProfileEditHandler handles displaying the profile edit form
 func ProfileEditHandler(w http.ResponseWriter, r *http.Request) {
@@ -860,38 +875,43 @@ func handleMessages() {
 }
 
 func CreateChatHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not supported", http.StatusMethodNotAllowed)
-		return
-	}
+    if r.Method != http.MethodPost {
+        http.Error(w, "Method not supported", http.StatusMethodNotAllowed)
+        return
+    }
 
-	cookie, err := r.Cookie("username")
-	if err != nil {
-		http.Redirect(w, r, "/login", http.StatusSeeOther)
-		return
-	}
+    cookie, err := r.Cookie("username")
+    if err != nil {
+        http.Redirect(w, r, "/login", http.StatusSeeOther)
+        return
+    }
 
-	username := cookie.Value
+    username := cookie.Value
 
-	var user User
-	err = db.QueryRow("SELECT username FROM users WHERE username = $1", username).Scan(&user.Username)
-	if err != nil {
-		log.Error("Error fetching user from the database:", err)
-		http.Error(w, "Error fetching user from the database", http.StatusInternalServerError)
-		return
-	}
+    var chatID int
+    err = db.QueryRow("SELECT id FROM chats WHERE user_id = $1 AND status = 'able'", username).Scan(&chatID)
+    if err == nil {
+        // Able chat exists, redirect to it
+        http.Redirect(w, r, fmt.Sprintf("/chat?chatID=%d&role=user", chatID), http.StatusSeeOther)
+        return
+    }
 
-	// Create a new chat
-	var chatID int
-	err = db.QueryRow("INSERT INTO chats (user_id) VALUES ($1) RETURNING id", user.Username).Scan(&chatID)
-	if err != nil {
-		log.Error("Error creating chat:", err)
-		http.Error(w, "Error creating chat", http.StatusInternalServerError)
-		return
-	}
+    if err != sql.ErrNoRows {
+        log.Error("Error checking for existing able chat:", err)
+        http.Error(w, "Error checking for existing chat", http.StatusInternalServerError)
+        return
+    }
 
-	// Redirect to the chat page
-	http.Redirect(w, r, fmt.Sprintf("/chat?chatID=%d", chatID), http.StatusSeeOther)
+    // No able chat exists, create a new one
+    err = db.QueryRow("INSERT INTO chats (user_id) VALUES ($1) RETURNING id", username).Scan(&chatID)
+    if err != nil {
+        log.Error("Error creating chat:", err)
+        http.Error(w, "Error creating chat", http.StatusInternalServerError)
+        return
+    }
+
+    // Redirect to the new chat
+    http.Redirect(w, r, fmt.Sprintf("/chat?chatID=%d&role=user", chatID), http.StatusSeeOther)
 }
 
 func CloseChatHandler(w http.ResponseWriter, r *http.Request) {
