@@ -7,9 +7,7 @@
     <link rel="stylesheet" href="/static/css/styles.css" />
     <script>
       document.addEventListener("DOMContentLoaded", function () {
-        const chatID = new URLSearchParams(window.location.search).get(
-          "chatID"
-        );
+        const chatID = new URLSearchParams(window.location.search).get("chatID");
         const role = "{{.Role}}"; // Получаем роль из шаблона
         const ws = new WebSocket("ws://127.0.0.1:8080/ws");
 
