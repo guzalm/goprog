@@ -38,6 +38,9 @@
         <a href="/logout">Log out</a>
         <a href="/admin">Admin Panel</a>
         <a href="/profile-edit">Profile Edit</a>
+        {{ if gt .AbleChatID 0 }}
+        <a href="/chat?chatID={{.AbleChatID}}&role=user">Able Chat</a>
+        {{ end }}
         <form action="/create-chat" method="post">
             <button type="submit">Create Chat</button>
         </form>
