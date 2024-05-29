@@ -77,6 +77,10 @@
                 <form method="get" action="/edit/{{.ID}}">
                     <button type="submit">Edit</button>
                 </form>
+                <form method="post" action="/create-transaction">
+                    <input type="hidden" name="productID" value="{{.ID}}">
+                    <button type="submit">Buy</button>
+                </form>
             </td>
         </tr>
         {{end}}
