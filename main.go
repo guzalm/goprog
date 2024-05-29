@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -9,6 +10,7 @@ import (
 	"html/template"
 	"io"
 	"math/big"
+	"net"
 	"net/http"
 	"net/smtp"
 	"os"
@@ -19,10 +21,22 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/jung-kurt/gofpdf"
 	_ "github.com/lib/pq"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/time/rate"
 )
+
+// Initialize DNS resolver to use Google's public DNS server
+func init() {
+	net.DefaultResolver = &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			d := net.Dialer{}
+			return d.DialContext(ctx, "udp", "8.8.8.8:53")
+		},
+	}
+}
 
 // Product structure represents a product in the store
 type Product struct {
@@ -57,6 +71,18 @@ type Message struct {
 	Sender    string    `json:"sender"`
 	Content   string    `json:"content"`
 	Timestamp time.Time `json:"timestamp"`
+}
+
+// Transaction represents a transaction
+type Transaction struct {
+	ID            int
+	ProductID     int
+	ProductName   string
+	ProductPrice  float64
+	CustomerName  string
+	CustomerEmail string
+	Status        string
+	Timestamp     time.Time
 }
 
 var (
@@ -115,22 +141,22 @@ func fetchNewsFromAPI(apiKey, keyword string) ([]News, error) {
 }
 
 func initDB() *sql.DB {
-	connStr := "user=postgres password=rayana2015 dbname=postgres sslmode=disable"
+	connStr := "user=postgres password=rayana2015 dbname=postgres host=127.0.0.1 sslmode=disable"
 	db, err := sql.Open("postgres", connStr)
-	if err != nil {
+	if (err != nil) {
 		log.Fatal("Error opening database connection:", err)
 		panic(err)
 	}
 
 	err = db.Ping()
-	if err != nil {
+	if (err != nil) {
 		log.Fatal("Error connecting to the database:", err)
 		panic(err)
 	}
 
 	log.Info("Connected to the database")
 
-	// Create the users, products, chats, and messages table if they don't exist
+	// Create the users, products, chats, messages, and transactions table if they don't exist
 	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS users (
         username TEXT PRIMARY KEY,
         email TEXT UNIQUE,
@@ -143,7 +169,7 @@ func initDB() *sql.DB {
         id SERIAL PRIMARY KEY,
         name TEXT,
         size TEXT,
-        price INT
+        price FLOAT
     );
     CREATE TABLE IF NOT EXISTS chats (
         id SERIAL PRIMARY KEY,
@@ -155,6 +181,16 @@ func initDB() *sql.DB {
         chat_id INT,
         sender TEXT,
         content TEXT,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS transactions (
+        id SERIAL PRIMARY KEY,
+        product_id INT,
+        product_name TEXT,
+        product_price FLOAT,
+        customer_name TEXT,
+        customer_email TEXT,
+        status TEXT,
         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );`)
 	if err != nil {
@@ -203,7 +239,7 @@ func fetchProductsFromDB(filter, sortBy string, page, pageSize int) ([]Product, 
 
 	rows, err := db.Query(query, args...)
 	if err != nil {
-		log.Error("Error fetching products from the database:", err)
+		log.Println("Error fetching products from the database:", err)
 		return nil, err
 	}
 	defer rows.Close()
@@ -211,14 +247,14 @@ func fetchProductsFromDB(filter, sortBy string, page, pageSize int) ([]Product, 
 	for rows.Next() {
 		var p Product
 		if err := rows.Scan(&p.ID, &p.Name, &p.Size, &p.Price); err != nil {
-			log.Error("Error scanning product row:", err)
+			log.Println("Error scanning product row:", err)
 			continue
 		}
 		products = append(products, p)
 	}
 
 	if err := rows.Err(); err != nil {
-		log.Error("Error iterating over product rows:", err)
+		log.Println("Error iterating over product rows:", err)
 		return nil, err
 	}
 
@@ -257,8 +293,8 @@ func AuthMiddleware(next http.Handler) http.Handler {
 }
 
 func sendEmail(to, subject, body string) error {
-	from := ""
-	password := ""
+	from := "liazzatmazhitova@gmail.com"
+	password := "pyga cxpi zjkq ljwy"
 	smtpHost := "smtp.gmail.com"
 	smtpPort := "587"
 
@@ -445,7 +481,7 @@ func IndexHandler(w http.ResponseWriter, r *http.Request) {
 			username := cookie.Value
 			err := db.QueryRow("SELECT id FROM chats WHERE user_id = $1 AND status = 'able'", username).Scan(&ableChatID)
 			if err != nil && err != sql.ErrNoRows {
-				log.Error("Error checking for able chat:", err)
+				log.Println("Error checking for able chat:", err)
 			}
 		}
 	}
@@ -459,7 +495,7 @@ func IndexHandler(w http.ResponseWriter, r *http.Request) {
 	// Fetch products from the database
 	products, err := fetchProductsFromDB(filter, sortBy, page, pageSize)
 	if err != nil {
-		log.Error("Error fetching products from the database:", err)
+		log.Println("Error fetching products from the database:", err)
 		http.Error(w, "Error fetching products from the database", http.StatusInternalServerError)
 		return
 	}
@@ -469,7 +505,7 @@ func IndexHandler(w http.ResponseWriter, r *http.Request) {
 	keyword := "fashion" // Replace with appropriate keyword
 	newsList, err := fetchNewsFromAPI(apiKey, keyword)
 	if err != nil {
-		log.Error("Error fetching news from API:", err)
+		log.Println("Error fetching news from API:", err)
 		// Handle the error, e.g., ignore or display an error message
 	}
 
@@ -483,7 +519,7 @@ func IndexHandler(w http.ResponseWriter, r *http.Request) {
 	chatID := "default_chat_id" // Use the appropriate chat ID
 	messages, err := fetchMessages(0)
 	if err != nil {
-		log.Error("Error fetching messages:", err)
+		log.Println("Error fetching messages:", err)
 	}
 
 	data := struct {
@@ -518,6 +554,151 @@ func IndexHandler(w http.ResponseWriter, r *http.Request) {
 	tmpl.Execute(w, data)
 }
 
+func BuyHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		productID, err := strconv.Atoi(r.URL.Query().Get("productID"))
+		if err != nil {
+			http.Error(w, "Invalid product ID", http.StatusBadRequest)
+			return
+		}
+
+		var product Product
+		err = db.QueryRow("SELECT id, name, size, price FROM products WHERE id = $1", productID).
+			Scan(&product.ID, &product.Name, &product.Size, &product.Price)
+		if err != nil {
+			http.Error(w, "Product not found", http.StatusNotFound)
+			return
+		}
+
+		tmpl := templates.Lookup("buy.html")
+		if tmpl == nil {
+			http.Error(w, "Template not found", http.StatusInternalServerError)
+			return
+		}
+
+		tmpl.Execute(w, product)
+		return
+	}
+
+	if r.Method == http.MethodPost {
+		productID, err := strconv.Atoi(r.FormValue("productID"))
+		if err != nil {
+			http.Error(w, "Invalid product ID", http.StatusBadRequest)
+			return
+		}
+
+		customerName := r.FormValue("name")
+		customerEmail := r.FormValue("email")
+		cardNumber := r.FormValue("cardNumber")
+		expirationDate := r.FormValue("expirationDate")
+		cvv := r.FormValue("cvv")
+
+		// Basic validation
+		if customerName == "" || customerEmail == "" || cardNumber == "" || expirationDate == "" || cvv == "" {
+			http.Error(w, "All fields are required", http.StatusBadRequest)
+			return
+		}
+
+		// Fetch product details from the database
+		var product Product
+		err = db.QueryRow("SELECT id, name, price FROM products WHERE id = $1", productID).
+			Scan(&product.ID, &product.Name, &product.Price)
+		if err != nil {
+			http.Error(w, "Product not found", http.StatusNotFound)
+			return
+		}
+
+		// Create a new transaction
+		var transactionID int
+		err = db.QueryRow("INSERT INTO transactions (product_id, product_name, product_price, customer_name, customer_email, status) VALUES ($1, $2, $3, $4, $5, 'pending') RETURNING id",
+			productID, product.Name, product.Price, customerName, customerEmail).Scan(&transactionID)
+		if err != nil {
+			log.Printf("Error creating transaction: %v", err)
+			http.Error(w, "Error creating transaction", http.StatusInternalServerError)
+			return
+		}
+
+		// Simulate payment processing (always assume success for this example)
+
+		// Update transaction status to "paid"
+		_, err = db.Exec("UPDATE transactions SET status = 'paid' WHERE id = $1", transactionID)
+		if err != nil {
+			log.Printf("Error updating transaction status: %v", err)
+			http.Error(w, "Error updating transaction status", http.StatusInternalServerError)
+			return
+		}
+
+		// Generate fiscal receipt
+		pdf := gofpdf.New("P", "mm", "A4", "")
+		pdf.AddPage()
+		pdf.SetFont("Arial", "B", 16)
+		pdf.Cell(40, 10, "Fiscal Receipt")
+		pdf.Ln(12)
+		pdf.SetFont("Arial", "", 12)
+		pdf.Cell(40, 10, fmt.Sprintf("Transaction ID: %d", transactionID))
+		pdf.Ln(10)
+		pdf.Cell(40, 10, fmt.Sprintf("Date: %s", time.Now().Format("02-01-2006 15:04:05")))
+		pdf.Ln(10)
+		pdf.Cell(40, 10, fmt.Sprintf("Customer: %s", customerName))
+		pdf.Ln(10)
+		pdf.Cell(40, 10, fmt.Sprintf("Email: %s", customerEmail))
+		pdf.Ln(10)
+		pdf.Cell(40, 10, "Items:")
+		pdf.Ln(10)
+		pdf.Cell(40, 10, fmt.Sprintf(" - %s: $%.2f", product.Name, product.Price))
+		pdf.Ln(10)
+		pdf.Cell(40, 10, fmt.Sprintf("Total: $%.2f", product.Price))
+
+		var buf bytes.Buffer
+		err = pdf.Output(&buf)
+		if err != nil {
+			log.Printf("Error generating PDF: %v", err)
+			http.Error(w, "Error generating receipt", http.StatusInternalServerError)
+			return
+		}
+
+		// Send receipt via email
+		subject := "Your Purchase Receipt"
+		body := "Thank you for your purchase. Please find your receipt attached."
+		err = sendEmailWithAttachment(customerEmail, subject, body, &buf, "receipt.pdf")
+		if err != nil {
+			log.Printf("Error sending email: %v", err)
+			http.Error(w, "Error sending email", http.StatusInternalServerError)
+			return
+		}
+
+		// Redirect to a success page
+		http.Redirect(w, r, "/success", http.StatusSeeOther)
+	}
+}
+
+func sendEmailWithAttachment(to, subject, body string, attachment *bytes.Buffer, filename string) error {
+	from := "liazzatmazhitova@gmail.com"
+	password := "pyga cxpi zjkq ljwy"
+	smtpHost := "smtp.gmail.com"
+	smtpPort := "587"
+
+	// Create the email message
+	message := "From: " + from + "\n" +
+		"To: " + to + "\n" +
+		"Subject: " + subject + "\n\n" +
+		body
+
+	// Create a multipart message
+	var msg bytes.Buffer
+	msg.WriteString(message)
+	msg.WriteString("\n\n")
+	msg.Write(attachment.Bytes())
+
+	// Connect to the SMTP server
+	auth := smtp.PlainAuth("", from, password, smtpHost)
+	err := smtp.SendMail(smtpHost+":"+smtpPort, auth, from, []string{to}, msg.Bytes())
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
 
 // ProfileEditHandler handles displaying the profile edit form
 func ProfileEditHandler(w http.ResponseWriter, r *http.Request) {
@@ -533,7 +714,7 @@ func ProfileEditHandler(w http.ResponseWriter, r *http.Request) {
 	var user User
 	err = db.QueryRow("SELECT username, email FROM users WHERE username = $1", username).Scan(&user.Username, &user.Email)
 	if err != nil {
-		log.Error("Error fetching user profile from the database:", err)
+		log.Println("Error fetching user profile from the database:", err)
 		http.Error(w, "Error fetching user profile from the database", http.StatusInternalServerError)
 		return
 	}
@@ -586,7 +767,7 @@ func AdminHandler(w http.ResponseWriter, r *http.Request) {
 	// Fetch active chats from the database
 	rows, err := db.Query("SELECT id, user_id FROM chats WHERE status = 'able'")
 	if err != nil {
-		log.Error("Error fetching chats from the database:", err)
+		log.Println("Error fetching chats from the database:", err)
 		http.Error(w, "Error fetching chats from the database", http.StatusInternalServerError)
 		return
 	}
@@ -602,7 +783,7 @@ func AdminHandler(w http.ResponseWriter, r *http.Request) {
 			UserID string
 		}
 		if err := rows.Scan(&chat.ID, &chat.UserID); err != nil {
-			log.Error("Error scanning chat row:", err)
+			log.Println("Error scanning chat row:", err)
 			continue
 		}
 		chats = append(chats, chat)
@@ -629,7 +810,7 @@ func AdminHandler(w http.ResponseWriter, r *http.Request) {
 
 	products, err := fetchProductsFromDB(filter, sortBy, page, pageSize)
 	if err != nil {
-		log.Error("Error fetching products from the database:", err)
+		log.Println("Error fetching products from the database:", err)
 		http.Error(w, "Error fetching products from the database", http.StatusInternalServerError)
 		return
 	}
@@ -698,14 +879,14 @@ func DeleteHandler(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Path[len("/delete/"):]
 	productID, err := strconv.Atoi(id)
 	if err != nil {
-		log.Error("Invalid product ID:", err)
+		log.Println("Invalid product ID:", err)
 		http.Error(w, "Invalid product ID", http.StatusBadRequest)
 		return
 	}
 
 	_, err = db.Exec("DELETE FROM products WHERE id = $1", productID)
 	if err != nil {
-		log.Error("Error deleting from database:", err)
+		log.Println("Error deleting from database:", err)
 		http.Error(w, "Error deleting from database", http.StatusInternalServerError)
 		return
 	}
@@ -835,7 +1016,7 @@ func fetchMessages(chatID int) ([]Message, error) {
 
 	rows, err := db.Query("SELECT id, chat_id, sender, content, timestamp FROM messages WHERE chat_id = $1 ORDER BY timestamp ASC", chatID)
 	if err != nil {
-		log.Error("Error fetching messages from the database:", err)
+		log.Println("Error fetching messages from the database:", err)
 		return nil, err
 	}
 	defer rows.Close()
@@ -843,14 +1024,14 @@ func fetchMessages(chatID int) ([]Message, error) {
 	for rows.Next() {
 		var msg Message
 		if err := rows.Scan(&msg.ID, &msg.ChatID, &msg.Sender, &msg.Content, &msg.Timestamp); err != nil {
-			log.Error("Error scanning message row:", err)
+			log.Println("Error scanning message row:", err)
 			continue
 		}
 		messages = append(messages, msg)
 	}
 
 	if err := rows.Err(); err != nil {
-		log.Error("Error iterating over message rows:", err)
+		log.Println("Error iterating over message rows:", err)
 		return nil, err
 	}
 
@@ -897,7 +1078,7 @@ func CreateChatHandler(w http.ResponseWriter, r *http.Request) {
     }
 
     if err != sql.ErrNoRows {
-        log.Error("Error checking for existing able chat:", err)
+        log.Println("Error checking for existing able chat:", err)
         http.Error(w, "Error checking for existing chat", http.StatusInternalServerError)
         return
     }
@@ -905,7 +1086,7 @@ func CreateChatHandler(w http.ResponseWriter, r *http.Request) {
     // No able chat exists, create a new one
     err = db.QueryRow("INSERT INTO chats (user_id) VALUES ($1) RETURNING id", username).Scan(&chatID)
     if err != nil {
-        log.Error("Error creating chat:", err)
+        log.Println("Error creating chat:", err)
         http.Error(w, "Error creating chat", http.StatusInternalServerError)
         return
     }
@@ -928,7 +1109,7 @@ func CloseChatHandler(w http.ResponseWriter, r *http.Request) {
 
 	_, err = db.Exec("UPDATE chats SET status = 'disable' WHERE id = $1", chatID)
 	if err != nil {
-		log.Error("Error closing chat:", err)
+		log.Println("Error closing chat:", err)
 		http.Error(w, "Error closing chat", http.StatusInternalServerError)
 		return
 	}
@@ -940,14 +1121,14 @@ func ChatHandler(w http.ResponseWriter, r *http.Request) {
 	chatIDStr := r.URL.Query().Get("chatID")
 	chatID, err := strconv.Atoi(chatIDStr)
 	if err != nil {
-		log.Error("Invalid chat ID:", err)
+		log.Println("Invalid chat ID:", err)
 		http.Error(w, "Invalid chat ID", http.StatusBadRequest)
 		return
 	}
 	role := r.URL.Query().Get("role") // Получаем роль из URL-параметра
 	messages, err := fetchMessages(chatID)
 	if err != nil {
-		log.Error("Error fetching messages:", err)
+		log.Println("Error fetching messages:", err)
 		http.Error(w, "Error fetching messages", http.StatusInternalServerError)
 		return
 	}
@@ -1001,6 +1182,7 @@ func main() {
 	http.HandleFunc("/login-post", LoginPostHandler)
 	http.HandleFunc("/logout", LogoutHandler)
 	http.HandleFunc("/", IndexHandler)
+	http.HandleFunc("/buy", BuyHandler) // Handle buying products
 	http.Handle("/admin", AuthMiddleware(http.HandlerFunc(AdminHandler)))
 	http.HandleFunc("/profile-edit", ProfileEditHandler)
 	http.HandleFunc("/profile-edit-post", ProfileEditPostHandler)
