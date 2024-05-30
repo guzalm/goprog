@@ -21,7 +21,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/jung-kurt/gofpdf"
+//	"github.com/jung-kurt/gofpdf"
 	_ "github.com/lib/pq"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/time/rate"
@@ -553,7 +553,6 @@ func IndexHandler(w http.ResponseWriter, r *http.Request) {
 	// Render the template with the data
 	tmpl.Execute(w, data)
 }
-
 func BuyHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		productID, err := strconv.Atoi(r.URL.Query().Get("productID"))
@@ -628,39 +627,15 @@ func BuyHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Generate fiscal receipt
-		pdf := gofpdf.New("P", "mm", "A4", "")
-		pdf.AddPage()
-		pdf.SetFont("Arial", "B", 16)
-		pdf.Cell(40, 10, "Fiscal Receipt")
-		pdf.Ln(12)
-		pdf.SetFont("Arial", "", 12)
-		pdf.Cell(40, 10, fmt.Sprintf("Transaction ID: %d", transactionID))
-		pdf.Ln(10)
-		pdf.Cell(40, 10, fmt.Sprintf("Date: %s", time.Now().Format("02-01-2006 15:04:05")))
-		pdf.Ln(10)
-		pdf.Cell(40, 10, fmt.Sprintf("Customer: %s", customerName))
-		pdf.Ln(10)
-		pdf.Cell(40, 10, fmt.Sprintf("Email: %s", customerEmail))
-		pdf.Ln(10)
-		pdf.Cell(40, 10, "Items:")
-		pdf.Ln(10)
-		pdf.Cell(40, 10, fmt.Sprintf(" - %s: $%.2f", product.Name, product.Price))
-		pdf.Ln(10)
-		pdf.Cell(40, 10, fmt.Sprintf("Total: $%.2f", product.Price))
+		// Prepare email content
+		subject := "Ваш чек на покупку"
+		body := fmt.Sprintf(
+			"Спасибо за покупку!\n\nИнформация о покупке:\nИмя покупателя: %s\nНазвание товара: %s\nЦена: $%.2f\nДата: %s\n",
+			customerName, product.Name, product.Price, time.Now().Format("02-01-2006 15:04:05"),
+		)
 
-		var buf bytes.Buffer
-		err = pdf.Output(&buf)
-		if err != nil {
-			log.Printf("Error generating PDF: %v", err)
-			http.Error(w, "Error generating receipt", http.StatusInternalServerError)
-			return
-		}
-
-		// Send receipt via email
-		subject := "Your Purchase Receipt"
-		body := "Thank you for your purchase. Please find your receipt attached."
-		err = sendEmailWithAttachment(customerEmail, subject, body, &buf, "receipt.pdf")
+		// Send email
+		err = sendEmail(customerEmail, subject, body)
 		if err != nil {
 			log.Printf("Error sending email: %v", err)
 			http.Error(w, "Error sending email", http.StatusInternalServerError)
